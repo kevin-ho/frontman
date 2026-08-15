@@ -48,3 +48,4 @@ infra/local/Caddyfile
 .env.secrets.resolved
 
 lefthook-local.yml
+apps/frontman_server/.env

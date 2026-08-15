@@ -51,6 +51,47 @@ end
 
 config :frontman_server, cloak_key: env!("CLOAK_KEY", :string!)
 
+# LOCAL-NOAUTH PATCH: read after Dotenvy loads .env (dev.exs runs too early).
+config :frontman_server, local_noauth_user_id: env!("LOCAL_NOAUTH_USER_ID", :string, nil)
+
+# LOCAL-NOAUTH PATCH: optional OpenAI-compatible custom provider. Set in the
+# gitignored envs/.dev.overrides.env (or real env). Fully generic — no vendor
+# specifics. A model entry is "Display Name|model-id"; omit the "|model-id"
+# part to reuse the id as the display name.
+custom_models =
+  case env!("CUSTOM_LLM_MODELS", :string, nil) do
+    nil ->
+      []
+
+    raw ->
+      raw
+      |> String.split(",", trim: true)
+      |> Enum.map(fn entry ->
+        entry
+        |> String.split("|", trim: true)
+        |> Enum.map(&String.trim/1)
+        |> case do
+          [display, model_id] -> {display, model_id, :packaged}
+          [model_id] -> {model_id, model_id, :packaged}
+        end
+      end)
+  end
+
+custom_llm =
+  if custom_models != [] do
+    %{
+      provider_id: env!("CUSTOM_LLM_PROVIDER_ID", :string, "custom"),
+      display_name: env!("CUSTOM_LLM_DISPLAY_NAME", :string, "Custom LLM"),
+      base_url: env!("CUSTOM_LLM_BASE_URL", :string!, nil),
+      api_key: env!("CUSTOM_LLM_API_KEY", :string, nil),
+      models: custom_models
+    }
+  else
+    nil
+  end
+
+config :frontman_server, :custom_llm, custom_llm
+
 config :workos, WorkOS.Client,
   api_key: env!("WORKOS_API_KEY", :string, nil),
   client_id: env!("WORKOS_CLIENT_ID", :string, nil)

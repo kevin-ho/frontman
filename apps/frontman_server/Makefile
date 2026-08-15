@@ -99,7 +99,7 @@ lint:
 	mix credo --strict
 
 dev:
-	op run --env-file=envs/.dev.secrets.env -- mix phx.server
+	op run -- mix phx.server
 
 dev-container:
 	mix phx.server
@@ -124,4 +124,4 @@ credo:
 check: lint test
 
 debug-task:
-	op run --env-file=envs/.dev.secrets.env -- mix debug_task $(ARGS)
+	op run -- mix debug_task $(ARGS)

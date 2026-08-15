@@ -119,6 +119,24 @@ defmodule FrontmanServerWeb.UserAuth do
   Will reissue the session token if it is older than the configured age.
   """
   def fetch_current_scope_for_user(conn, _opts) do
+    # LOCAL-NOAUTH PATCH: single-user local mode. When enabled, every request
+    # is treated as the seeded local user; WorkOS/OAuth is never consulted.
+    local_user_id = Application.get_env(:frontman_server, :local_noauth_user_id)
+
+    if local_user_id do
+      case Accounts.get_user(local_user_id) do
+        %Accounts.User{} = user ->
+          assign(conn, :current_scope, Scope.for_user(user))
+
+        nil ->
+          assign(conn, :current_scope, Scope.for_user(nil))
+      end
+    else
+      fetch_current_scope_for_user_original(conn)
+    end
+  end
+
+  defp fetch_current_scope_for_user_original(conn) do
     case ensure_user_token(conn) do
       {token, conn} ->
         case Accounts.get_user_by_session_token(token) do
@@ -296,7 +314,10 @@ defmodule FrontmanServerWeb.UserAuth do
   Plug for routes that require sudo mode.
   """
   def require_sudo_mode(conn, _opts) do
-    if Accounts.sudo_mode?(conn.assigns.current_scope.user, -10) do
+    # LOCAL-NOAUTH PATCH: sudo mode is a re-auth gate for shared machines;
+    # meaningless for a single-user local install. Always pass.
+    if Accounts.sudo_mode?(conn.assigns.current_scope.user, -10) or
+         not is_nil(Application.get_env(:frontman_server, :local_noauth_user_id)) do
       conn
     else
       conn
@@ -314,7 +335,11 @@ defmodule FrontmanServerWeb.UserAuth do
   redirects to that URL instead of the default signed-in path.
   """
   def redirect_if_user_is_authenticated(conn, _opts) do
-    if conn.assigns.current_scope do
+    # LOCAL-NOAUTH PATCH: in local mode the login page is the session-minting
+    # endpoint (UserSessionController.new mints a real session cookie there).
+    # Never short-circuit it — let the controller run so the cookie lands.
+    if conn.assigns.current_scope &&
+         is_nil(Application.get_env(:frontman_server, :local_noauth_user_id)) do
       return_to = conn.params["return_to"]
 
       conn

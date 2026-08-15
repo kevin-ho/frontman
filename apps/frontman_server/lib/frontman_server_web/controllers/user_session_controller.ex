@@ -12,6 +12,23 @@ defmodule FrontmanServerWeb.UserSessionController do
   alias FrontmanServerWeb.UserAuth
 
   def new(conn, params) do
+    # LOCAL-NOAUTH PATCH: in single-user local mode, visiting the login page
+    # mints a real session for the local user instead of showing the OAuth
+    # form. WorkOS is never consulted. Honors ?return_to= like the normal
+    # login flow (safe_return_url? still applies inside log_in_user).
+    local_user_id = Application.get_env(:frontman_server, :local_noauth_user_id)
+
+    if local_user_id do
+      case Accounts.get_user(local_user_id) do
+        %Accounts.User{} = user ->
+          conn
+          |> maybe_put_user_return_to(params["return_to"])
+          |> UserAuth.log_in_user(user, %{})
+
+        nil ->
+          render(conn, :new, form: Phoenix.Component.to_form(%{}, as: "user"))
+      end
+    else
     email = get_in(conn.assigns, [:current_scope, Access.key(:user), Access.key(:email)])
     form = Phoenix.Component.to_form(%{"email" => email}, as: "user")
 
@@ -21,6 +38,7 @@ defmodule FrontmanServerWeb.UserSessionController do
       |> maybe_put_signup_framework(params["framework"])
 
     render(conn, :new, form: form)
+  end
   end
 
   def create(conn, %{"user" => %{"token" => token} = user_params} = params) do

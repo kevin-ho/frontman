@@ -48,10 +48,24 @@ defmodule FrontmanServer.Providers do
   def prepare_llm_args(scope, model, opts) when is_binary(model) and model != "" do
     provider = model_provider_name(model)
 
-    case oauth_llm_opts(provider, resolve_oauth_token(scope, provider)) do
-      {:ok, llm_opts} -> {:ok, {model, Keyword.merge(llm_opts, opts)}}
-      {:error, reason} -> {:error, reason}
-      :use_api_key -> api_key_llm_args(scope, provider, model, opts)
+    # LOCAL-NOAUTH PATCH: generic OpenAI-compatible provider configured via
+    # CUSTOM_LLM_* env vars (see runtime.exs). Rewrites <id>:<model> to the
+    # openai vendor with the configured base_url — ReqLLM has no custom
+    # vendors, and unknown openai model ids resolve via inline-model fallback.
+    custom = custom_llm_config()
+
+    if custom != nil and provider == custom.provider_id do
+      if is_binary(custom.api_key) and custom.api_key != "" do
+        custom_llm_args(custom, model, opts)
+      else
+        {:error, :no_api_key}
+      end
+    else
+      case oauth_llm_opts(provider, resolve_oauth_token(scope, provider)) do
+        {:ok, llm_opts} -> {:ok, {model, Keyword.merge(llm_opts, opts)}}
+        {:error, reason} -> {:error, reason}
+        :use_api_key -> api_key_llm_args(scope, provider, model, opts)
+      end
     end
   end
 
@@ -87,6 +101,26 @@ defmodule FrontmanServer.Providers do
       nil ->
         {:error, :no_api_key}
     end
+  end
+
+  # LOCAL-NOAUTH PATCH: rewrite <id>:<model> to the openai vendor with the
+  # configured base_url (ReqLLM has no custom vendors; unknown openai model
+  # ids resolve via the inline-model fallback path).
+  defp custom_llm_args(custom, model, opts) do
+    {_provider, model_id} = model_parts(model)
+    rewritten = "openai:#{model_id}"
+
+    llm_opts =
+      [api_key: custom.api_key, base_url: custom.base_url]
+      |> Keyword.merge(opts)
+
+    {:ok, {rewritten, llm_opts}}
+  end
+
+  # LOCAL-NOAUTH PATCH: env-configured custom provider (set in runtime.exs
+  # from CUSTOM_LLM_* vars). nil when not configured.
+  defp custom_llm_config do
+    Application.get_env(:frontman_server, :custom_llm)
   end
 
   defp api_key_llm_opts("anthropic", key),
@@ -189,7 +223,13 @@ defmodule FrontmanServer.Providers do
   Returns the provider-specific maximum image dimension when constrained.
   """
   def max_image_dimension(provider) when is_binary(provider) do
-    provider_config(provider).max_image_dimension
+    # LOCAL-NOAUTH PATCH: tolerate providers not in the config (e.g. the
+    # "openai" vendor produced by the custom-LLM rewrite) — no entry means
+    # no image-dimension constraint, not a crash.
+    case Map.fetch(@provider_configs, String.downcase(provider)) do
+      {:ok, %{max_image_dimension: dim}} -> dim
+      :error -> nil
+    end
   end
 
   @doc """
@@ -441,6 +481,8 @@ defmodule FrontmanServer.Providers do
         end
       end)
 
+    custom = custom_llm_config()
+
     provider_configs =
       Enum.filter(@providers, fn
         {provider, %{models: [_ | _]}} ->
@@ -449,6 +491,20 @@ defmodule FrontmanServer.Providers do
         {_provider, _config} ->
           false
       end)
+
+    # LOCAL-NOAUTH PATCH: PREPEND the env-configured custom provider group
+    # (CUSTOM_LLM_* env vars — see runtime.exs). Built at runtime, not from
+    # the compile-time @providers attribute, so env changes need no recompile.
+    # Prepended (not appended) so the custom provider is the FIRST group: the
+    # client auto-selects the first model in the first group for fresh
+    # browsers, which makes the local LLM the default instead of an
+    # OpenRouter model nobody can actually use on this install.
+    provider_configs =
+      if custom != nil do
+        [{custom.provider_id, %{display_name: custom.display_name, models: custom.models}} | provider_configs]
+      else
+        provider_configs
+      end
 
     groups =
       Enum.map(provider_configs, fn {provider, config} ->
@@ -467,9 +523,8 @@ defmodule FrontmanServer.Providers do
     %{groups: groups}
   end
 
-  defp provider_config(provider) do
-    Map.fetch!(@provider_configs, String.downcase(provider))
-  end
+  # LOCAL-NOAUTH PATCH: provider_config/1 removed — was only used by
+  # max_image_dimension, which now tolerates unknown providers directly.
 
   defp model_parts(model) when is_binary(model) do
     case String.split(model, ":", parts: 2) do

@@ -203,9 +203,23 @@ defmodule SwarmAi.LLM.Response do
       MapSet.member?(malformed_indexes, index) ->
         raw = Map.fetch!(fragments_by_index, index)
 
-        Logger.warning("Tool call #{name} (#{id}) has invalid JSON arguments: #{inspect(raw)}")
+        # LOCAL-NOAUTH PATCH: some models (observed: MiniMax-M3 via streaming)
+        # emit tool-call argument fragments whose reassembled JSON lost its
+        # leading "{" (stream chunk loss) — e.g. `"key": "value", ...}`.
+        # Repair by re-wrapping when that yields valid JSON.
+        repaired = repair_missing_leading_brace(raw)
 
-        raw
+        if repaired do
+          Logger.info(
+            "Tool call #{name} (#{id}) arguments lost leading brace; repaired"
+          )
+
+          repaired
+        else
+          Logger.warning("Tool call #{name} (#{id}) has invalid JSON arguments: #{inspect(raw)}")
+
+          raw
+        end
 
       Map.has_key?(fragments_by_index, index) ->
         Map.fetch!(fragments_by_index, index)
@@ -225,6 +239,33 @@ defmodule SwarmAi.LLM.Response do
   defp encode_tool_call_arguments(args) when is_binary(args), do: args
   defp encode_tool_call_arguments(args) when is_map(args), do: Jason.encode!(args)
   defp encode_tool_call_arguments(args), do: Jason.encode!(args)
+
+  # LOCAL-NOAUTH PATCH: repair tool-call arguments that lost their leading
+  # "{" during streaming. Returns the repaired JSON string, or nil if the
+  # wrap doesn't yield valid JSON (i.e. it wasn't this corruption class).
+  defp repair_missing_leading_brace(raw) when is_binary(raw) do
+    trimmed = String.trim(raw)
+
+    cond do
+      String.starts_with?(trimmed, "{") ->
+        nil
+
+      String.trim_trailing(trimmed, ",") == "" ->
+        nil
+
+      true ->
+        candidate = "{\n" <> trimmed
+
+        with {:ok, decoded} <- Jason.decode(candidate),
+             is_map(decoded) do
+          Jason.encode!(decoded)
+        else
+          _ -> nil
+        end
+    end
+  end
+
+  defp repair_missing_leading_brace(_), do: nil
 
   defp empty_tool_call_arguments?(nil), do: true
 

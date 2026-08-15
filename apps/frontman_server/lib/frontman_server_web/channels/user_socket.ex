@@ -19,7 +19,8 @@ defmodule FrontmanServerWeb.UserSocket do
   def connect(params, socket, connect_info) do
     scope =
       get_scope_from_token(params) ||
-        get_scope_from_session(connect_info)
+        get_scope_from_session(connect_info) ||
+        get_scope_from_local_noauth()
 
     case scope do
       %Scope{} -> {:ok, assign(socket, :scope, scope)}
@@ -44,6 +45,18 @@ defmodule FrontmanServerWeb.UserSocket do
       Scope.for_user(user)
     else
       _ -> nil
+    end
+  end
+
+  # LOCAL-NOAUTH PATCH: single-user local mode fallback.
+  defp get_scope_from_local_noauth do
+    case Application.get_env(:frontman_server, :local_noauth_user_id) do
+      nil -> nil
+      user_id ->
+        case Accounts.get_user(user_id) do
+          %Accounts.User{} = user -> Scope.for_user(user)
+          nil -> nil
+        end
     end
   end
 
