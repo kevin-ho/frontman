@@ -193,6 +193,34 @@ Plus `providers/custom_llm.ex` and this file, which are new and cannot conflict.
 Two more files — `tool_executor.ex` and `response.ex` — are the upstream bug
 fixes described above; they leave the surface if upstream merges the PRs.
 
+### Upstream churn per patched file
+
+How often upstream touches each file we patch (last 200 upstream commits) — this
+is the real conflict-probability ranking, so weigh it before adding a patch:
+
+| File | Touched by | |
+|---|---|---|
+| `Client__State__StateReducer.res` | 50 / 200 | hottest file in the repo we touch |
+| `providers.ex` | 20 / 200 | |
+| `config/runtime.exs` | 17 / 200 | our hunk is at the end, away from the churn |
+| `user_auth.ex` | 11 / 200 | |
+| `config/dev.exs` | 10 / 200 | |
+| `user_session_controller.ex` | 7 / 200 | |
+| `Makefile` | 6 / 200 | |
+| `user_api_key_controller.ex` | 4 / 200 | untouched by us today |
+| `socket_token_controller.ex` | 2 / 200 | |
+
+### `make check-source-comments` fails here by design
+
+Upstream CI enforces comment-free authored source (`scripts/no-comments.mjs`,
+added in #1361). This fork carries ~70 `# LOCAL-NOAUTH PATCH` comments on
+purpose — they are the map of what we changed. Don't chase that target green on
+this branch.
+
+It does mean **anything sent upstream must be comment-free**: the
+`upstream-fixes` branch is, and passes `make check-source-comments`. Rationale for
+those commits lives in the commit messages, not in the source.
+
 To re-check the inventory after a merge:
 
 ```bash

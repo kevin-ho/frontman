@@ -203,10 +203,6 @@ defmodule SwarmAi.LLM.Response do
       MapSet.member?(malformed_indexes, index) ->
         raw = Map.fetch!(fragments_by_index, index)
 
-        # Some models (observed: MiniMax-M3 via streaming) emit tool-call argument
-        # fragments whose reassembled JSON lost its leading "{" (stream chunk
-        # loss) — e.g. `"key": "value", ...}`. Repair by re-wrapping when that
-        # yields valid JSON.
         case repair_missing_leading_brace(raw) do
           nil ->
             Logger.warning(
@@ -240,9 +236,6 @@ defmodule SwarmAi.LLM.Response do
   defp encode_tool_call_arguments(args) when is_map(args), do: Jason.encode!(args)
   defp encode_tool_call_arguments(args), do: Jason.encode!(args)
 
-  # Repair tool-call arguments that lost their leading
-  # "{" during streaming. Returns the repaired JSON string, or nil if the
-  # wrap doesn't yield valid JSON (i.e. it wasn't this corruption class).
   defp repair_missing_leading_brace(raw) when is_binary(raw) do
     trimmed = String.trim(raw)
 
