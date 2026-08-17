@@ -43,11 +43,21 @@ All local changes are marked `LOCAL-NOAUTH PATCH` in the source. Summary:
 3. **`config/dev.exs`**: DB creds / port / bind from env (`PORT`, loopback
    bind for reverse-proxy TLS termination), and `check_origin` is an allowlist
    instead of upstream's `false` — extend it with `FRONTMAN_ALLOWED_ORIGINS`.
-4. **Client** (`Client__State__StateReducer.res`): `hasAnyProviderConfigured`
-   treats any model group id outside the client's known cloud set
-   (openai / anthropic / openrouter / nvidia / fireworks) as "a working LLM
-   exists", which opens the provider-setup gate for a custom provider. Rebuild
-   the bundle after touching this — see *Building the client from source*.
+4. **Client provider-setup gate — solved server-side, no client patch.**
+   The compiled client decides "is any provider configured?" purely from
+   `/api/user/api-keys`, and recognises only its four hardcoded cloud providers.
+   With a `CUSTOM_LLM_*` provider it would park on the setup screen forever, so
+   `user_api_key_controller.ex` adds an `"openrouter"` marker to that response
+   (logic in the fork-only `frontman_server_web/local_noauth.ex`).
+   - Applied at the **controller** boundary, never inside
+     `Providers.list_api_key_providers/1` — the model picker calls that function
+     directly, so it never advertises cloud models this install can't use.
+     Verified: `/api/user/api-keys` → `{"providers":["openrouter"]}` while the
+     picker shows only the custom group.
+   - **`Client__State__StateReducer.res` is upstream-identical**, so the stock
+     client bundle works and **no client rebuild is needed after an upstream
+     merge**. That file is the highest-churn file in the repo (50 of the last 200
+     upstream commits), which is exactly why the fix does not live there.
 5. **`apps/frontman_server/Makefile`**: `make dev` / `make debug-task` no longer
    wrap in `op run` — WorkOS secrets are unused in local mode, so the 1Password
    CLI is not required.
@@ -109,14 +119,13 @@ Restart the service after changing any of these — they're read at boot.
 ## First-run seeding
 
 The DB needs the local user, and nothing else. **No API-key rows are needed** —
-the client-side `hasAnyProviderConfigured` patch (item 4 above) opens the
-provider-setup gate on the presence of the custom model group itself.
+the `"openrouter"` marker on `/api/user/api-keys` (item 4 above) opens the
+provider-setup gate.
 
-Two older recipes are retired and should not be reintroduced: seeding a decoy
-`openrouter` API-key row (it polluted the picker with 22 cloud models that
-could never work here), and the server-side `UserApiKeyController.index`
-`"openrouter"` marker shim (replaced by the client patch, so
-`user_api_key_controller.ex` is upstream-identical).
+One older recipe is retired and should not be reintroduced: seeding a decoy
+`openrouter` API-key row in the database. It polluted the model picker with 22
+cloud models that could never work here, because the picker reads the same table.
+The marker is applied at the controller instead, which the picker never consults.
 
 ```bash
 cd apps/frontman_server
@@ -172,7 +181,7 @@ few, additive, and away from upstream logic.** Concretely:
   `providers.exs`, `user_api_key_controller.ex`, `user_socket.ex` are all
   byte-identical to upstream).
 
-Current merge surface — **10 files for local mode** (hunk counts measured with
+Current merge surface — **10 files for local mode, none of them in the client** (hunk counts measured with
 `git diff`, i.e. 3 lines of context, which is what a merge actually reasons about):
 
 | File | Hunks | Notes |
@@ -184,11 +193,12 @@ Current merge surface — **10 files for local mode** (hunk counts measured with
 | `Makefile` | 2 | drop `op run` |
 | `config/runtime.exs` | 1 | one contiguous block appended to the shared section |
 | `socket_token_controller.ex` | 1 | whole `show/2` (tiny file) |
-| `Client__State__StateReducer.res` | 1 | `hasAnyProviderConfigured` |
+| `user_api_key_controller.ex` | 1 | gate marker (upstream touches it 4/200) |
 | `.gitignore` | 1 | one appended line |
 | `envs/.dev.secrets.env` | 1 | file deleted |
 
-Plus `providers/custom_llm.ex` and this file, which are new and cannot conflict.
+Plus `providers/custom_llm.ex`, `frontman_server_web/local_noauth.ex` and this
+file, which are new and cannot conflict.
 
 Two more files — `tool_executor.ex` and `response.ex` — are the upstream bug
 fixes described above; they leave the surface if upstream merges the PRs.
@@ -200,14 +210,14 @@ is the real conflict-probability ranking, so weigh it before adding a patch:
 
 | File | Touched by | |
 |---|---|---|
-| `Client__State__StateReducer.res` | 50 / 200 | hottest file in the repo we touch |
+| `Client__State__StateReducer.res` | 50 / 200 | hottest file in the repo — deliberately NOT patched |
 | `providers.ex` | 20 / 200 | |
 | `config/runtime.exs` | 17 / 200 | our hunk is at the end, away from the churn |
 | `user_auth.ex` | 11 / 200 | |
 | `config/dev.exs` | 10 / 200 | |
 | `user_session_controller.ex` | 7 / 200 | |
 | `Makefile` | 6 / 200 | |
-| `user_api_key_controller.ex` | 4 / 200 | untouched by us today |
+| `user_api_key_controller.ex` | 4 / 200 | carries the gate marker instead |
 | `socket_token_controller.ex` | 2 / 200 | |
 
 ### `make check-source-comments` fails here by design
@@ -236,9 +246,12 @@ them, drop them from this branch on the next merge.
 
 ## Building the client from source
 
-The overlay UI served at `/frontman` is **built from this repo** (`libs/client`,
-ReScript + React). Do not fetch `frontman.es.js` from `app.frontman.sh` — the
-CDN bundle is upstream's build and cannot carry our client patches.
+**No longer required.** The fork carries **zero client patches** — the provider
+gate is handled server-side (item 4 above) — so upstream's own bundle works,
+whether from the CDN or a local build. Nothing here needs redoing after an
+upstream merge.
+
+Build from source only if you want to change the overlay UI yourself:
 
 ```bash
 corepack enable --install-directory ~/.local/bin   # once; yarn 4 via corepack
@@ -250,10 +263,6 @@ cp libs/client/dist/frontman.css   <app>/public/frontman/
 ```
 
 Output is a single self-contained ES module (`dist/frontman.es.js`, ~2.6 MB,
-React bundled) plus `frontman.css`. Sanity check: a bundle
-megabyte-for-megabyte identical to upstream's CDN build (± a few hundred
-bytes for patches) means the pipeline is faithful. The client patch that
-matters: `hasAnyProviderConfigured` in
-`libs/client/src/state/Client__State__StateReducer.res` — a model group id
-outside the known cloud set opens the provider gate (see commit message).
-After any client-source change, rebuild and redeploy the bundle.
+React bundled) plus `frontman.css`. Since the fork carries no client patches, a
+build from this repo should match upstream's CDN bundle — that equivalence is the
+sanity check that the pipeline is faithful.

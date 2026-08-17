@@ -445,38 +445,6 @@ module Selectors = {
   }
 
   let hasAnyProviderConfigured = (state: state): bool => {
-    // LOCAL-NOAUTH PATCH: a custom provider group in the pushed configOptions
-    // (e.g. CUSTOM_LLM_* on the server) means the server has a working LLM,
-    // so the setup gate must not block the client. Upstream's whitelist only
-    // knows cloud providers; custom providers never satisfy it otherwise.
-    let customProviderConfigured = switch state.configOptions {
-    | None => false
-    | Some(configOptions) =>
-      switch ACP.findConfigOptionByCategory(configOptions, ACP.Model) {
-      | Some(ACP.SelectConfigOption({options: ACP.Grouped(groups)})) =>
-        // LOCAL-NOAUTH PATCH: the server only emits model groups that have
-        // real credentials (saved API key / OAuth) or come from its
-        // CUSTOM_LLM_* env provider. The five ids below are the ones this
-        // client's own key/OAuth checks already cover; ANY other group id
-        // (whatever CUSTOM_LLM_PROVIDER_ID was configured) means the server
-        // has a working LLM — open the gate. Generic: no provider id is
-        // hardcoded.
-        let isClientKnownCloudProvider = (id: string): bool =>
-          switch id {
-          | "openai"
-          | "anthropic"
-          | "openrouter"
-          | "nvidia"
-          | "fireworks"
-            => true
-          | _ => false
-          }
-        groups->Belt.Array.some(g => !isClientKnownCloudProvider(g.group))
-      | _ => false
-      }
-    }
-
-    customProviderConfigured ||
     switch state.anthropicOAuthStatus {
     | Connected(_) => true
     | _ =>
