@@ -121,18 +121,14 @@ defmodule FrontmanServerWeb.UserAuth do
   def fetch_current_scope_for_user(conn, _opts) do
     # LOCAL-NOAUTH PATCH: single-user local mode. When enabled, every request
     # is treated as the seeded local user; WorkOS/OAuth is never consulted.
-    local_user_id = Application.get_env(:frontman_server, :local_noauth_user_id)
+    case Application.get_env(:frontman_server, :local_noauth_user_id) do
+      nil ->
+        fetch_current_scope_for_user_original(conn)
 
-    if local_user_id do
-      case Accounts.get_user(local_user_id) do
-        %Accounts.User{} = user ->
-          assign(conn, :current_scope, Scope.for_user(user))
-
-        nil ->
-          assign(conn, :current_scope, Scope.for_user(nil))
-      end
-    else
-      fetch_current_scope_for_user_original(conn)
+      user_id ->
+        # Scope.for_user/1 maps a missing user to nil — a bad LOCAL_NOAUTH_USER_ID
+        # then behaves like "not signed in" rather than half-authenticating.
+        assign(conn, :current_scope, Scope.for_user(Accounts.get_user(user_id)))
     end
   end
 
@@ -315,9 +311,16 @@ defmodule FrontmanServerWeb.UserAuth do
   """
   def require_sudo_mode(conn, _opts) do
     # LOCAL-NOAUTH PATCH: sudo mode is a re-auth gate for shared machines;
-    # meaningless for a single-user local install. Always pass.
-    if Accounts.sudo_mode?(conn.assigns.current_scope.user, -10) or
-         not is_nil(Application.get_env(:frontman_server, :local_noauth_user_id)) do
+    # meaningless for a single-user local install. Checked first so a missing
+    # local user can't blow up on conn.assigns.current_scope.user.
+    case Application.get_env(:frontman_server, :local_noauth_user_id) do
+      nil -> require_sudo_mode_original(conn)
+      _user_id -> conn
+    end
+  end
+
+  defp require_sudo_mode_original(conn) do
+    if Accounts.sudo_mode?(conn.assigns.current_scope.user, -10) do
       conn
     else
       conn
@@ -338,8 +341,14 @@ defmodule FrontmanServerWeb.UserAuth do
     # LOCAL-NOAUTH PATCH: in local mode the login page is the session-minting
     # endpoint (UserSessionController.new mints a real session cookie there).
     # Never short-circuit it — let the controller run so the cookie lands.
-    if conn.assigns.current_scope &&
-         is_nil(Application.get_env(:frontman_server, :local_noauth_user_id)) do
+    case Application.get_env(:frontman_server, :local_noauth_user_id) do
+      nil -> redirect_if_user_is_authenticated_original(conn)
+      _user_id -> conn
+    end
+  end
+
+  defp redirect_if_user_is_authenticated_original(conn) do
+    if conn.assigns.current_scope do
       return_to = conn.params["return_to"]
 
       conn

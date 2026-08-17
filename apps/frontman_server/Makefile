@@ -98,8 +98,10 @@ lint:
 	mix format --check-formatted
 	mix credo --strict
 
+# LOCAL-NOAUTH PATCH: no 1Password wrapper — WorkOS secrets are unused in local
+# mode, and everything else comes from envs/.dev.overrides.env via Dotenvy.
 dev:
-	op run -- mix phx.server
+	mix phx.server
 
 dev-container:
 	mix phx.server
@@ -124,4 +126,4 @@ credo:
 check: lint test
 
 debug-task:
-	op run -- mix debug_task $(ARGS)
+	mix debug_task $(ARGS)

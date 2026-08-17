@@ -77,17 +77,22 @@ custom_models =
       end)
   end
 
+# LOCAL-NOAUTH PATCH: CUSTOM_LLM_BASE_URL is required once models are set —
+# `:string!` (no default) so a half-configured install fails loudly at boot
+# instead of sending requests to a nil base_url.
 custom_llm =
-  if custom_models != [] do
-    %{
-      provider_id: env!("CUSTOM_LLM_PROVIDER_ID", :string, "custom"),
-      display_name: env!("CUSTOM_LLM_DISPLAY_NAME", :string, "Custom LLM"),
-      base_url: env!("CUSTOM_LLM_BASE_URL", :string!, nil),
-      api_key: env!("CUSTOM_LLM_API_KEY", :string, nil),
-      models: custom_models
-    }
-  else
-    nil
+  case custom_models do
+    [] ->
+      nil
+
+    [_ | _] ->
+      %{
+        provider_id: env!("CUSTOM_LLM_PROVIDER_ID", :string, "custom"),
+        display_name: env!("CUSTOM_LLM_DISPLAY_NAME", :string, "Custom LLM"),
+        base_url: env!("CUSTOM_LLM_BASE_URL", :string!),
+        api_key: env!("CUSTOM_LLM_API_KEY", :string, nil),
+        models: custom_models
+      }
   end
 
 config :frontman_server, :custom_llm, custom_llm

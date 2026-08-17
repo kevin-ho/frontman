@@ -16,29 +16,15 @@ defmodule FrontmanServerWeb.UserSessionController do
     # mints a real session for the local user instead of showing the OAuth
     # form. WorkOS is never consulted. Honors ?return_to= like the normal
     # login flow (safe_return_url? still applies inside log_in_user).
-    local_user_id = Application.get_env(:frontman_server, :local_noauth_user_id)
+    case local_noauth_user() do
+      %Accounts.User{} = user ->
+        conn
+        |> maybe_put_user_return_to(params["return_to"])
+        |> UserAuth.log_in_user(user, %{})
 
-    if local_user_id do
-      case Accounts.get_user(local_user_id) do
-        %Accounts.User{} = user ->
-          conn
-          |> maybe_put_user_return_to(params["return_to"])
-          |> UserAuth.log_in_user(user, %{})
-
-        nil ->
-          render(conn, :new, form: Phoenix.Component.to_form(%{}, as: "user"))
-      end
-    else
-    email = get_in(conn.assigns, [:current_scope, Access.key(:user), Access.key(:email)])
-    form = Phoenix.Component.to_form(%{"email" => email}, as: "user")
-
-    conn =
-      conn
-      |> maybe_put_user_return_to(params["return_to"])
-      |> maybe_put_signup_framework(params["framework"])
-
-    render(conn, :new, form: form)
-  end
+      nil ->
+        new_oauth(conn, params)
+    end
   end
 
   def create(conn, %{"user" => %{"token" => token} = user_params} = params) do
@@ -122,6 +108,28 @@ defmodule FrontmanServerWeb.UserSessionController do
     conn
     |> put_flash(:info, "Logged out successfully.")
     |> UserAuth.log_out_user(params["return_to"])
+  end
+
+  # LOCAL-NOAUTH PATCH: nil unless local mode is on AND the seeded user exists,
+  # so a stale LOCAL_NOAUTH_USER_ID falls back to the real login page instead of
+  # rendering a dead form.
+  defp local_noauth_user do
+    case Application.get_env(:frontman_server, :local_noauth_user_id) do
+      nil -> nil
+      user_id -> Accounts.get_user(user_id)
+    end
+  end
+
+  defp new_oauth(conn, params) do
+    email = get_in(conn.assigns, [:current_scope, Access.key(:user), Access.key(:email)])
+    form = Phoenix.Component.to_form(%{"email" => email}, as: "user")
+
+    conn =
+      conn
+      |> maybe_put_user_return_to(params["return_to"])
+      |> maybe_put_signup_framework(params["framework"])
+
+    render(conn, :new, form: form)
   end
 
   defp maybe_put_user_return_to(conn, nil), do: conn

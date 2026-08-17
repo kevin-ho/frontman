@@ -52,20 +52,16 @@ defmodule FrontmanServer.Providers do
     # CUSTOM_LLM_* env vars (see runtime.exs). Rewrites <id>:<model> to the
     # openai vendor with the configured base_url — ReqLLM has no custom
     # vendors, and unknown openai model ids resolve via inline-model fallback.
-    custom = custom_llm_config()
-
-    if custom != nil and provider == custom.provider_id do
-      if is_binary(custom.api_key) and custom.api_key != "" do
+    case custom_llm_config() do
+      %{provider_id: ^provider} = custom ->
         custom_llm_args(custom, model, opts)
-      else
-        {:error, :no_api_key}
-      end
-    else
-      case oauth_llm_opts(provider, resolve_oauth_token(scope, provider)) do
-        {:ok, llm_opts} -> {:ok, {model, Keyword.merge(llm_opts, opts)}}
-        {:error, reason} -> {:error, reason}
-        :use_api_key -> api_key_llm_args(scope, provider, model, opts)
-      end
+
+      _ ->
+        case oauth_llm_opts(provider, resolve_oauth_token(scope, provider)) do
+          {:ok, llm_opts} -> {:ok, {model, Keyword.merge(llm_opts, opts)}}
+          {:error, reason} -> {:error, reason}
+          :use_api_key -> api_key_llm_args(scope, provider, model, opts)
+        end
     end
   end
 
@@ -111,11 +107,17 @@ defmodule FrontmanServer.Providers do
     rewritten = "openai:#{model_id}"
 
     llm_opts =
-      [api_key: custom.api_key, base_url: custom.base_url]
+      [api_key: custom_api_key(custom.api_key), base_url: custom.base_url]
       |> Keyword.merge(opts)
 
     {:ok, {rewritten, llm_opts}}
   end
+
+  # LOCAL-NOAUTH PATCH: keyless endpoints (Ollama, LM Studio, an unauthenticated
+  # LiteLLM/9Router gateway) still need *some* api_key for the openai vendor to
+  # build a request, so send a placeholder instead of refusing with :no_api_key.
+  defp custom_api_key(key) when is_binary(key) and key != "", do: key
+  defp custom_api_key(_key), do: "not-needed"
 
   # LOCAL-NOAUTH PATCH: env-configured custom provider (set in runtime.exs
   # from CUSTOM_LLM_* vars). nil when not configured.
@@ -500,10 +502,12 @@ defmodule FrontmanServer.Providers do
     # browsers, which makes the local LLM the default instead of an
     # OpenRouter model nobody can actually use on this install.
     provider_configs =
-      if custom != nil do
-        [{custom.provider_id, %{display_name: custom.display_name, models: custom.models}} | provider_configs]
-      else
-        provider_configs
+      case custom do
+        nil ->
+          provider_configs
+
+        %{provider_id: provider_id, display_name: display_name, models: models} ->
+          [{provider_id, %{display_name: display_name, models: models}} | provider_configs]
       end
 
     groups =

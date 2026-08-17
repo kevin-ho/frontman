@@ -210,9 +210,9 @@ defmodule FrontmanServer.Tasks.Execution.ToolExecutor do
         :ok
 
       {:error, {:invalid_tool_arguments, message} = reason} ->
-        # LOCAL-NOAUTH PATCH: a malformed tool call (bad JSON from the model)
-        # must not crash the whole execution loop. Persist an error tool
-        # result so the model sees the failure and can retry with valid JSON.
+        # A malformed tool call (bad JSON from the model) must not crash the whole
+        # execution loop. Persist an error tool result so the model sees the
+        # failure and can retry with valid JSON.
         Logger.error(
           "ToolExecutor: Failed to publish MCP tool call #{tool_call.id}: #{inspect(reason)}"
         )

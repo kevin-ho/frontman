@@ -203,22 +203,22 @@ defmodule SwarmAi.LLM.Response do
       MapSet.member?(malformed_indexes, index) ->
         raw = Map.fetch!(fragments_by_index, index)
 
-        # LOCAL-NOAUTH PATCH: some models (observed: MiniMax-M3 via streaming)
-        # emit tool-call argument fragments whose reassembled JSON lost its
-        # leading "{" (stream chunk loss) — e.g. `"key": "value", ...}`.
-        # Repair by re-wrapping when that yields valid JSON.
-        repaired = repair_missing_leading_brace(raw)
+        # Some models (observed: MiniMax-M3 via streaming) emit tool-call argument
+        # fragments whose reassembled JSON lost its leading "{" (stream chunk
+        # loss) — e.g. `"key": "value", ...}`. Repair by re-wrapping when that
+        # yields valid JSON.
+        case repair_missing_leading_brace(raw) do
+          nil ->
+            Logger.warning(
+              "Tool call #{name} (#{id}) has invalid JSON arguments: #{inspect(raw)}"
+            )
 
-        if repaired do
-          Logger.info(
-            "Tool call #{name} (#{id}) arguments lost leading brace; repaired"
-          )
+            raw
 
-          repaired
-        else
-          Logger.warning("Tool call #{name} (#{id}) has invalid JSON arguments: #{inspect(raw)}")
+          repaired ->
+            Logger.info("Tool call #{name} (#{id}) arguments lost leading brace; repaired")
 
-          raw
+            repaired
         end
 
       Map.has_key?(fragments_by_index, index) ->
@@ -240,7 +240,7 @@ defmodule SwarmAi.LLM.Response do
   defp encode_tool_call_arguments(args) when is_map(args), do: Jason.encode!(args)
   defp encode_tool_call_arguments(args), do: Jason.encode!(args)
 
-  # LOCAL-NOAUTH PATCH: repair tool-call arguments that lost their leading
+  # Repair tool-call arguments that lost their leading
   # "{" during streaming. Returns the repaired JSON string, or nil if the
   # wrap doesn't yield valid JSON (i.e. it wasn't this corruption class).
   defp repair_missing_leading_brace(raw) when is_binary(raw) do
@@ -256,11 +256,10 @@ defmodule SwarmAi.LLM.Response do
       true ->
         candidate = "{\n" <> trimmed
 
-        with {:ok, decoded} <- Jason.decode(candidate),
-             is_map(decoded) do
-          Jason.encode!(decoded)
-        else
-          _ -> nil
+        case Jason.decode(candidate) do
+          {:ok, decoded} when is_map(decoded) -> Jason.encode!(decoded)
+          {:ok, _other} -> nil
+          {:error, _reason} -> nil
         end
     end
   end
