@@ -22,6 +22,9 @@ defmodule FrontmanServer.Providers do
     OpenAIOAuth
   }
 
+  # LOCAL-NOAUTH PATCH: fork-only module, see providers/custom_llm.ex.
+  alias FrontmanServer.Providers.CustomLLM
+
   @providers Application.compile_env!(:frontman_server, :providers)
              |> Enum.map(fn {provider, config} -> {Atom.to_string(provider), config} end)
 
@@ -48,13 +51,10 @@ defmodule FrontmanServer.Providers do
   def prepare_llm_args(scope, model, opts) when is_binary(model) and model != "" do
     provider = model_provider_name(model)
 
-    # LOCAL-NOAUTH PATCH: generic OpenAI-compatible provider configured via
-    # CUSTOM_LLM_* env vars (see runtime.exs). Rewrites <id>:<model> to the
-    # openai vendor with the configured base_url — ReqLLM has no custom
-    # vendors, and unknown openai model ids resolve via inline-model fallback.
-    case custom_llm_config() do
+    # LOCAL-NOAUTH PATCH: generic OpenAI-compatible provider — see CustomLLM.
+    case CustomLLM.config() do
       %{provider_id: ^provider} = custom ->
-        custom_llm_args(custom, model, opts)
+        CustomLLM.llm_args(custom, model, opts)
 
       _ ->
         case oauth_llm_opts(provider, resolve_oauth_token(scope, provider)) do
@@ -97,32 +97,6 @@ defmodule FrontmanServer.Providers do
       nil ->
         {:error, :no_api_key}
     end
-  end
-
-  # LOCAL-NOAUTH PATCH: rewrite <id>:<model> to the openai vendor with the
-  # configured base_url (ReqLLM has no custom vendors; unknown openai model
-  # ids resolve via the inline-model fallback path).
-  defp custom_llm_args(custom, model, opts) do
-    {_provider, model_id} = model_parts(model)
-    rewritten = "openai:#{model_id}"
-
-    llm_opts =
-      [api_key: custom_api_key(custom.api_key), base_url: custom.base_url]
-      |> Keyword.merge(opts)
-
-    {:ok, {rewritten, llm_opts}}
-  end
-
-  # LOCAL-NOAUTH PATCH: keyless endpoints (Ollama, LM Studio, an unauthenticated
-  # LiteLLM/9Router gateway) still need *some* api_key for the openai vendor to
-  # build a request, so send a placeholder instead of refusing with :no_api_key.
-  defp custom_api_key(key) when is_binary(key) and key != "", do: key
-  defp custom_api_key(_key), do: "not-needed"
-
-  # LOCAL-NOAUTH PATCH: env-configured custom provider (set in runtime.exs
-  # from CUSTOM_LLM_* vars). nil when not configured.
-  defp custom_llm_config do
-    Application.get_env(:frontman_server, :custom_llm)
   end
 
   defp api_key_llm_opts("anthropic", key),
@@ -227,10 +201,11 @@ defmodule FrontmanServer.Providers do
   def max_image_dimension(provider) when is_binary(provider) do
     # LOCAL-NOAUTH PATCH: tolerate providers not in the config (e.g. the
     # "openai" vendor produced by the custom-LLM rewrite) — no entry means
-    # no image-dimension constraint, not a crash.
-    case Map.fetch(@provider_configs, String.downcase(provider)) do
-      {:ok, %{max_image_dimension: dim}} -> dim
-      :error -> nil
+    # no image-dimension constraint, not a crash. provider_config/1 itself is
+    # left upstream-identical.
+    case Map.has_key?(@provider_configs, String.downcase(provider)) do
+      true -> provider_config(provider).max_image_dimension
+      false -> nil
     end
   end
 
@@ -483,7 +458,7 @@ defmodule FrontmanServer.Providers do
         end
       end)
 
-    custom = custom_llm_config()
+    custom = CustomLLM.config()
 
     provider_configs =
       Enum.filter(@providers, fn
@@ -494,20 +469,15 @@ defmodule FrontmanServer.Providers do
           false
       end)
 
-    # LOCAL-NOAUTH PATCH: PREPEND the env-configured custom provider group
-    # (CUSTOM_LLM_* env vars — see runtime.exs). Built at runtime, not from
-    # the compile-time @providers attribute, so env changes need no recompile.
-    # Prepended (not appended) so the custom provider is the FIRST group: the
-    # client auto-selects the first model in the first group for fresh
-    # browsers, which makes the local LLM the default instead of an
-    # OpenRouter model nobody can actually use on this install.
+    # LOCAL-NOAUTH PATCH: PREPEND the custom provider group so it is FIRST —
+    # the client auto-selects the first model of the first group for fresh
+    # browsers, making the custom LLM the default instead of a cloud model with
+    # no credentials on this install. Built at runtime, so env changes need no
+    # recompile.
     provider_configs =
       case custom do
-        nil ->
-          provider_configs
-
-        %{provider_id: provider_id, display_name: display_name, models: models} ->
-          [{provider_id, %{display_name: display_name, models: models}} | provider_configs]
+        nil -> provider_configs
+        %{} -> [CustomLLM.picker_group(custom) | provider_configs]
       end
 
     groups =
@@ -527,8 +497,9 @@ defmodule FrontmanServer.Providers do
     %{groups: groups}
   end
 
-  # LOCAL-NOAUTH PATCH: provider_config/1 removed — was only used by
-  # max_image_dimension, which now tolerates unknown providers directly.
+  defp provider_config(provider) do
+    Map.fetch!(@provider_configs, String.downcase(provider))
+  end
 
   defp model_parts(model) when is_binary(model) do
     case String.split(model, ":", parts: 2) do

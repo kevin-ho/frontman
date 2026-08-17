@@ -32,7 +32,14 @@ config :frontman_server, FrontmanServerWeb.Endpoint,
     ip: {127, 0, 0, 1},
     port: String.to_integer(System.get_env("PORT") || "4000")
   ],
-  check_origin: false,
+  # LOCAL-NOAUTH PATCH: upstream ships `check_origin: false`, which with the auth
+  # bypass lets ANY page open in the same browser drive the agent over the socket
+  # (and the agent writes files). Allow only local origins; add proxy/tailnet
+  # hostnames with FRONTMAN_ALLOWED_ORIGINS="//app.example.ts.net,//frontman.local".
+  # An entry without a port matches that host on any port.
+  check_origin:
+    ["//localhost", "//127.0.0.1", "//frontman.local"] ++
+      String.split(System.get_env("FRONTMAN_ALLOWED_ORIGINS") || "", ",", trim: true),
   code_reloader: true,
   debug_errors: true,
   secret_key_base: "NBTbU2SqLo+ghhs3jQiZAjRrQKhim/x/HXSbx49mBnt4pSvEkjTYYrj+prSCInNO",

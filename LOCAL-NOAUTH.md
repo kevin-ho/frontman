@@ -9,29 +9,40 @@ via OpenAI-compat, etc.) configured purely through environment variables.
 All local changes are marked `LOCAL-NOAUTH PATCH` in the source. Summary:
 
 1. **Auth bypass** (gated on `LOCAL_NOAUTH_USER_ID` being set):
-   - `user_auth.ex`, `user_session_controller.ex`, `user_socket.ex`,
-     `socket_token_controller.ex` — requests fall back to the seeded local
-     user; `GET /users/log-in` mints a real session cookie. A
-     `LOCAL_NOAUTH_USER_ID` that points at a non-existent user degrades to
-     "not signed in" (real login page), it does not half-authenticate.
+   - `user_auth.ex`, `user_session_controller.ex`, `socket_token_controller.ex`
+     — requests fall back to the seeded local user; `GET /users/log-in` mints a
+     real session cookie. A `LOCAL_NOAUTH_USER_ID` that points at a
+     non-existent user degrades to "not signed in" (real login page), it does
+     not half-authenticate.
+   - `user_socket.ex` is **upstream-identical** — the socket needs no patch,
+     because in local mode the client already gets a token from
+     `/api/socket-token` (or a cookie from the login page), which the upstream
+     `get_scope_from_token` / `get_scope_from_session` paths accept.
    - **Security posture:** in this mode the server has no authentication left.
      See *Security* below before exposing it past loopback.
 2. **Generic custom LLM provider** (gated on `CUSTOM_LLM_MODELS` being set):
    - `runtime.exs` reads `CUSTOM_LLM_*` vars and exposes a `:custom_llm` map.
      `CUSTOM_LLM_BASE_URL` is required once `CUSTOM_LLM_MODELS` is set — a
      half-configured install fails at boot rather than at first request.
-   - `providers.ex` **prepends** the custom group to the model picker at
-     runtime, so it is the FIRST group and a fresh browser auto-selects the
-     custom model as default instead of a cloud model that has no credentials
-     on this install. It also rewrites `<id>:<model>` → `openai:<model>` +
-     `base_url` in `prepare_llm_args/3` (ReqLLM has no custom vendors; unknown
-     openai model ids resolve via inline-model fallback).
+   - `providers/custom_llm.ex` (**new file, fork-only**) holds the rewrite
+     `<id>:<model>` → `openai:<model>` + `base_url`, the key placeholder, and
+     the picker group. ReqLLM has no custom vendors; unknown openai model ids
+     resolve via its inline-model fallback.
+   - `providers.ex` keeps only three small call sites into that module:
+     `prepare_llm_args/3`, `max_image_dimension/1`, and the picker, where the
+     custom group is **prepended** so it is the FIRST group — a fresh browser
+     auto-selects the custom model instead of a cloud model with no credentials
+     on this install. `provider_config/1` is upstream-identical.
    - `CUSTOM_LLM_API_KEY` is optional: when unset, a placeholder key is sent so
      keyless endpoints (Ollama, LM Studio, an unauthenticated gateway) work.
-   - `max_image_dimension/1` tolerates unknown providers (returns nil instead
-     of raising) because the rewrite leaks the `openai` vendor into a lookup.
+   - `CUSTOM_LLM_PROVIDER_ID` **must not** be `openai`, `anthropic`,
+     `openrouter`, `nvidia` or `fireworks`. The compiled client treats those
+     five as "cloud provider, needs a saved key/OAuth", so reusing one leaves
+     the overlay stuck on the setup screen. `runtime.exs` refuses to boot in
+     that case rather than letting you debug a dead gate.
 3. **`config/dev.exs`**: DB creds / port / bind from env (`PORT`, loopback
-   bind for reverse-proxy TLS termination).
+   bind for reverse-proxy TLS termination), and `check_origin` is an allowlist
+   instead of upstream's `false` — extend it with `FRONTMAN_ALLOWED_ORIGINS`.
 4. **Client** (`Client__State__StateReducer.res`): `hasAnyProviderConfigured`
    treats any model group id outside the client's known cloud set
    (openai / anthropic / openrouter / nvidia / fireworks) as "a working LLM
@@ -64,7 +75,8 @@ compile-time config, so env changes need only a service restart.
 | `CUSTOM_LLM_MODELS` | yes (for custom provider) | — | Comma-separated `Display Name\|model-id` entries |
 | `CUSTOM_LLM_BASE_URL` | yes (when models set) | — | OpenAI-compatible base URL (must end in `/v1`) |
 | `CUSTOM_LLM_API_KEY` | no | placeholder | API key for the endpoint; omit for keyless local endpoints |
-| `CUSTOM_LLM_PROVIDER_ID` | no | `custom` | Picker group id (becomes `<id>:<model>` prefix) |
+| `CUSTOM_LLM_PROVIDER_ID` | no | `custom` | Picker group id (becomes `<id>:<model>` prefix). Never `openai`/`anthropic`/`openrouter`/`nvidia`/`fireworks` — boot refuses |
+| `FRONTMAN_ALLOWED_ORIGINS` | no | — | Extra socket origins, comma-separated (`//app.example.ts.net`). Omit the port to match any port |
 | `CUSTOM_LLM_DISPLAY_NAME` | no | `Custom LLM` | Picker group display name |
 
 All are read in `runtime.exs` **after** Dotenvy loads `envs/.dev.env` and
@@ -127,26 +139,68 @@ With `LOCAL_NOAUTH_USER_ID` set, the server has **no authentication**. Every
 request is the local user, `GET /users/log-in` mints a session cookie on demand,
 and `/api/socket-token` issues a socket token to anyone who asks.
 
-Two consequences worth knowing:
+What that means in practice:
 
-- `config/dev.exs` still sets `check_origin: false`. Combined with the auth
-  bypass, any web page open in the same browser can connect to the socket on
-  `http://127.0.0.1:4000` and drive the agent — which writes files in your repo.
-  Tighten it to an explicit list when you care:
-  `check_origin: ["//localhost:4000", "//127.0.0.1:4000"]`.
+- **The socket origin allowlist is the only thing standing between a random web
+  page and your source tree.** Upstream's `check_origin: false` plus the auth
+  bypass let any page open in the same browser connect to
+  `http://127.0.0.1:4000` and drive the agent, which writes files in your repo.
+  `dev.exs` now allows only `//localhost`, `//127.0.0.1`, `//frontman.local`,
+  plus anything in `FRONTMAN_ALLOWED_ORIGINS`. Verified: a foreign `Origin` gets
+  **403** on the websocket handshake, allowed ones get **101**. Keep that list as
+  small as your setup allows, and never put `false` back while the bypass is on.
 - Binding to loopback does not protect against the above (the caller is a page
   in your browser, not a remote host). If you expose the server past loopback
   via a reverse proxy or Tailscale Serve, put authentication on the *proxy* —
   the app has none left.
+- The origin check gates the *handshake*, not authorization. An allowed-origin
+  connection with no token and no cookie still upgrades (upstream permits an
+  anonymous socket); channel joins are what require a scope.
 
 ## Merging upstream
 
-All local-mode patches are marked `LOCAL-NOAUTH PATCH`. The philosophy: minimal
-hunk count per file, additive files never conflict, and `providers.exs` is
-upstream-identical. The high-traffic merge surfaces are `providers.ex`
-(picker + prepare path) and `runtime.exs` (env reads) — everything else is
-either additive or a gated `case` at the top of a function, with the upstream
-body moved untouched into a `*_original/1` helper.
+All local-mode patches are marked `LOCAL-NOAUTH PATCH`. The philosophy: **keep
+the number of touched upstream files small, and inside each one keep the hunks
+few, additive, and away from upstream logic.** Concretely:
+
+- Fork-only code lives in **new files** (`providers/custom_llm.ex`,
+  `LOCAL-NOAUTH.md`) — a file upstream doesn't have can never conflict.
+- A gate is a `case` at the *top* of a function; the upstream body is moved
+  verbatim into a `*_original/1` helper. If upstream rewrites that body, git
+  applies the change inside the helper with no conflict.
+- No upstream function is deleted or reworded (`provider_config/1`,
+  `providers.exs`, `user_api_key_controller.ex`, `user_socket.ex` are all
+  byte-identical to upstream).
+
+Current merge surface — **10 files for local mode** (hunk counts measured with
+`git diff`, i.e. 3 lines of context, which is what a merge actually reasons about):
+
+| File | Hunks | Notes |
+|---|---|---|
+| `providers.ex` | 5 | alias, prepare path, `max_image_dimension/1`, picker prepend — each a one-liner into `CustomLLM` |
+| `user_auth.ex` | 3 | each a `case` + `*_original/1` |
+| `config/dev.exs` | 2 | Repo creds; endpoint (http bind + `check_origin`) |
+| `user_session_controller.ex` | 2 | `new/2` gate + two private helpers |
+| `Makefile` | 2 | drop `op run` |
+| `config/runtime.exs` | 1 | one contiguous block appended to the shared section |
+| `socket_token_controller.ex` | 1 | whole `show/2` (tiny file) |
+| `Client__State__StateReducer.res` | 1 | `hasAnyProviderConfigured` |
+| `.gitignore` | 1 | one appended line |
+| `envs/.dev.secrets.env` | 1 | file deleted |
+
+Plus `providers/custom_llm.ex` and this file, which are new and cannot conflict.
+
+Two more files — `tool_executor.ex` and `response.ex` — are the upstream bug
+fixes described above; they leave the surface if upstream merges the PRs.
+
+To re-check the inventory after a merge:
+
+```bash
+git diff --stat <upstream-base> -- . ':!LOCAL-NOAUTH.md'
+for f in $(git diff --name-only <upstream-base> -- . ':!LOCAL-NOAUTH.md'); do
+  printf "%-62s %s\n" "$f" "$(git diff <upstream-base> -- "$f" | grep -c '^@@')"
+done
+```
 
 The two upstream bug fixes also live on the **`upstream-fixes`** branch (off the
 same upstream base, no local-mode code). Send those as PRs; if upstream takes

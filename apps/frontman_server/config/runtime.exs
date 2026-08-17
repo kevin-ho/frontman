@@ -77,6 +77,28 @@ custom_models =
       end)
   end
 
+# LOCAL-NOAUTH PATCH: the compiled client's provider-setup gate treats these
+# five group ids as "cloud provider, needs a saved key/OAuth" and only opens for
+# an *unknown* group id. Reusing one of them as CUSTOM_LLM_PROVIDER_ID leaves the
+# overlay stuck on the setup screen with no way past, so refuse at boot.
+client_known_cloud_provider_ids = ~w(openai anthropic openrouter nvidia fireworks)
+
+custom_provider_id! = fn ->
+  id = env!("CUSTOM_LLM_PROVIDER_ID", :string, "custom")
+
+  case Enum.member?(client_known_cloud_provider_ids, id) do
+    false ->
+      id
+
+    true ->
+      raise Dotenvy.Error,
+        message:
+          "CUSTOM_LLM_PROVIDER_ID must not be one of #{inspect(client_known_cloud_provider_ids)} " <>
+            "— the client's provider-setup gate never opens for those. Pick any other id " <>
+            "(e.g. \"custom\", \"gateway\", \"mistral-compat\"); it only labels the picker group."
+  end
+end
+
 # LOCAL-NOAUTH PATCH: CUSTOM_LLM_BASE_URL is required once models are set —
 # `:string!` (no default) so a half-configured install fails loudly at boot
 # instead of sending requests to a nil base_url.
@@ -87,7 +109,7 @@ custom_llm =
 
     [_ | _] ->
       %{
-        provider_id: env!("CUSTOM_LLM_PROVIDER_ID", :string, "custom"),
+        provider_id: custom_provider_id!.(),
         display_name: env!("CUSTOM_LLM_DISPLAY_NAME", :string, "Custom LLM"),
         base_url: env!("CUSTOM_LLM_BASE_URL", :string!),
         api_key: env!("CUSTOM_LLM_API_KEY", :string, nil),
