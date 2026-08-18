@@ -44,7 +44,7 @@ defmodule FrontmanServer.Providers.CustomLLM do
     {provider_id, %{display_name: display_name, models: models}}
   end
 
-  # Keyless endpoints (Ollama, LM Studio, an unauthenticated LiteLLM/9Router
+  # Keyless endpoints (Ollama, LM Studio, an unauthenticated LiteLLM-style
   # gateway) still need *some* api_key for the openai vendor to build a request,
   # so send a placeholder rather than refusing with :no_api_key.
   defp api_key(key) when is_binary(key) and key != "", do: key

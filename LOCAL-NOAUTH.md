@@ -1,7 +1,7 @@
 # LOCAL-NOAUTH mode
 
 Run the Frontman server with WorkOS auth bypassed (single local user) and any
-OpenAI-compatible LLM endpoint (9Router, LiteLLM, Mistral, Google AI Studio
+OpenAI-compatible LLM endpoint (LiteLLM, Mistral, Google AI Studio
 via OpenAI-compat, etc.) configured purely through environment variables.
 
 ## What changed vs upstream
@@ -104,11 +104,11 @@ CUSTOM_LLM_API_KEY=...
 CUSTOM_LLM_MODELS=Mistral Large|mistral-large-latest,Codestral|codestral-latest
 ```
 
-## Example: local gateway (9Router / LiteLLM style)
+## Example: local OpenAI-compatible gateway
 
 ```bash
-CUSTOM_LLM_PROVIDER_ID=9router
-CUSTOM_LLM_DISPLAY_NAME=9Router
+CUSTOM_LLM_PROVIDER_ID=custom
+CUSTOM_LLM_DISPLAY_NAME=Local Gateway
 CUSTOM_LLM_BASE_URL=http://127.0.0.1:4000/v1
 CUSTOM_LLM_API_KEY=...
 CUSTOM_LLM_MODELS=Main|my-main-combo
