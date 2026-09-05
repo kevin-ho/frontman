@@ -32,9 +32,16 @@ strict_boolean! = fn env_var_name, raw_value ->
 end
 
 env_boolean = fn env_var_name, default_value ->
-  case env!(env_var_name, :string?, nil) do
-    nil -> default_value
-    raw_value -> strict_boolean!.(env_var_name, raw_value)
+  case env!(env_var_name, :string, :frontman_env_boolean_missing) do
+    :frontman_env_boolean_missing ->
+      default_value
+
+    raw_value ->
+      if String.trim(raw_value) == "" do
+        default_value
+      else
+        strict_boolean!.(env_var_name, raw_value)
+      end
   end
 end
 
@@ -44,16 +51,82 @@ end
 
 config :frontman_server, cloak_key: env!("CLOAK_KEY", :string!)
 
-if config_env() in [:dev, :prod] do
-  config :workos, WorkOS.Client,
-    api_key: env!("WORKOS_API_KEY", :string!),
-    client_id: env!("WORKOS_CLIENT_ID", :string!)
+# LOCAL-NOAUTH PATCH: read after Dotenvy loads .env (dev.exs runs too early).
+config :frontman_server, local_noauth_user_id: env!("LOCAL_NOAUTH_USER_ID", :string, nil)
+
+# LOCAL-NOAUTH PATCH: optional OpenAI-compatible custom provider. Set in the
+# gitignored envs/.dev.overrides.env (or real env). Fully generic — no vendor
+# specifics. A model entry is "Display Name|model-id"; omit the "|model-id"
+# part to reuse the id as the display name.
+custom_models =
+  case env!("CUSTOM_LLM_MODELS", :string, nil) do
+    nil ->
+      []
+
+    raw ->
+      raw
+      |> String.split(",", trim: true)
+      |> Enum.map(fn entry ->
+        entry
+        |> String.split("|", trim: true)
+        |> Enum.map(&String.trim/1)
+        |> case do
+          [display, model_id] -> {display, model_id, :packaged}
+          [model_id] -> {model_id, model_id, :packaged}
+        end
+      end)
+  end
+
+# LOCAL-NOAUTH PATCH: the compiled client's provider-setup gate treats these
+# five group ids as "cloud provider, needs a saved key/OAuth" and only opens for
+# an *unknown* group id. Reusing one of them as CUSTOM_LLM_PROVIDER_ID leaves the
+# overlay stuck on the setup screen with no way past, so refuse at boot.
+client_known_cloud_provider_ids = ~w(openai anthropic openrouter nvidia fireworks)
+
+custom_provider_id! = fn ->
+  id = env!("CUSTOM_LLM_PROVIDER_ID", :string, "custom")
+
+  case Enum.member?(client_known_cloud_provider_ids, id) do
+    false ->
+      id
+
+    true ->
+      raise Dotenvy.Error,
+        message:
+          "CUSTOM_LLM_PROVIDER_ID must not be one of #{inspect(client_known_cloud_provider_ids)} " <>
+            "— the client's provider-setup gate never opens for those. Pick any other id " <>
+            "(e.g. \"custom\", \"gateway\", \"mistral-compat\"); it only labels the picker group."
+  end
 end
+
+# LOCAL-NOAUTH PATCH: CUSTOM_LLM_BASE_URL is required once models are set —
+# `:string!` (no default) so a half-configured install fails loudly at boot
+# instead of sending requests to a nil base_url.
+custom_llm =
+  case custom_models do
+    [] ->
+      nil
+
+    [_ | _] ->
+      %{
+        provider_id: custom_provider_id!.(),
+        display_name: env!("CUSTOM_LLM_DISPLAY_NAME", :string, "Custom LLM"),
+        base_url: env!("CUSTOM_LLM_BASE_URL", :string!),
+        api_key: env!("CUSTOM_LLM_API_KEY", :string, nil),
+        models: custom_models
+      }
+  end
+
+config :frontman_server, :custom_llm, custom_llm
+
+config :workos, WorkOS.Client,
+  api_key: env!("WORKOS_API_KEY", :string, nil),
+  client_id: env!("WORKOS_CLIENT_ID", :string, nil)
 
 if config_env() in [:dev, :test, :e2e] do
   db_host = env!("DB_HOST", :string, "localhost")
 
-  db_name = env!("DB_NAME", :string?, nil)
+  db_name = env!("DB_NAME", :string, nil)
 
   repo_overrides = []
 
@@ -77,23 +150,38 @@ if config_env() in [:dev, :test, :e2e] do
 end
 
 if config_env() == :prod do
-  discord_new_users_webhook_url = env!("DISCORD_NEW_USERS_WEBHOOK_URL", :string!)
-  discord_task_summaries_webhook_url = env!("DISCORD_TASK_SUMMARIES_WEBHOOK_URL", :string!)
-  resend_api_key = env!("RESEND_API_KEY", :string!)
+  discord_new_users_webhook_url = env!("DISCORD_NEW_USERS_WEBHOOK_URL", :string, nil)
+  resend_api_key = env!("RESEND_API_KEY", :string, nil)
 
-  config :frontman_server, FrontmanServer.Workers.SendWelcomeEmail, enabled: true
+  discord_notifications_enabled =
+    is_binary(discord_new_users_webhook_url) and String.trim(discord_new_users_webhook_url) != ""
 
-  config :frontman_server, FrontmanServer.Workers.SyncResendContact, enabled: true
+  resend_enabled = is_binary(resend_api_key) and String.trim(resend_api_key) != ""
+
+  config :frontman_server,
+    discord_new_users_webhook_url: discord_new_users_webhook_url
+
+  config :frontman_server, FrontmanServer.Workers.SendWelcomeEmail, enabled: resend_enabled
+  config :frontman_server, FrontmanServer.Workers.SyncResendContact, enabled: resend_enabled
 
   config :frontman_server, FrontmanServer.Workers.NotifyDiscordNewUser,
-    enabled: true,
-    webhook_url: discord_new_users_webhook_url
+    enabled: discord_notifications_enabled
 
-  config :frontman_server, FrontmanServer.Workers.SendAgentFeedbackToDiscord,
-    enabled: true,
-    webhook_url: discord_task_summaries_webhook_url
+  config :sentry,
+    dsn:
+      "https://442ae992e5a5ccfc42e6910220aeb2a9@o4510512511320064.ingest.de.sentry.io/4510512546185296",
+    environment_name: config_env(),
+    release: "frontman_server@#{Application.spec(:frontman_server, :vsn) || "no_vsn"}",
+    enable_source_code_context: true,
+    root_source_code_paths: [File.cwd!()],
+    tags: %{service: "frontman-server"}
 
-  database_url = env!("DATABASE_URL", :string!)
+  database_url =
+    System.get_env("DATABASE_URL") ||
+      raise """
+      environment variable DATABASE_URL is missing.
+      For example: ecto://USER:PASS@HOST/DATABASE
+      """
 
   maybe_ipv6 = if env_boolean.("ECTO_IPV6", false), do: [:inet6], else: []
 
@@ -108,33 +196,37 @@ if config_env() == :prod do
 
   config :frontman_server, FrontmanServer.Repo, [
     {:url, database_url},
-    {:pool_size, env!("POOL_SIZE", :integer, 10)},
+    {:pool_size, String.to_integer(System.get_env("POOL_SIZE") || "10")},
     {:socket_options, maybe_ipv6}
     | ssl_config
   ]
 
-  secret_key_base = env!("SECRET_KEY_BASE", :string!)
+  secret_key_base =
+    System.get_env("SECRET_KEY_BASE") ||
+      raise """
+      environment variable SECRET_KEY_BASE is missing.
+      You can generate one by calling: mix phx.gen.secret
+      """
 
-  host = env!("PHX_HOST", :string, "example.com")
-  port = env!("PORT", :integer, 4000)
+  host = System.get_env("PHX_HOST") || "example.com"
+  port = String.to_integer(System.get_env("PORT") || "4000")
 
-  http_shutdown_timeout_ms = env!("HTTP_SHUTDOWN_TIMEOUT_MS", :integer, 30_000)
+  config :frontman_server, :dns_cluster_query, System.get_env("DNS_CLUSTER_QUERY")
 
-  config :frontman_server, :dns_cluster_query, env!("DNS_CLUSTER_QUERY", :string?, nil)
-
-  check_origin = ["https://#{host}", "https://*.#{host}"]
+  check_origin = false
 
   config :frontman_server, FrontmanServerWeb.Endpoint,
     url: [host: host, port: 443, scheme: "https"],
     http: [
       ip: {0, 0, 0, 0, 0, 0, 0, 0},
-      port: port,
-      thousand_island_options: [shutdown_timeout: http_shutdown_timeout_ms]
+      port: port
     ],
     check_origin: check_origin,
     secret_key_base: secret_key_base
 
-  config :frontman_server, FrontmanServer.Mailer,
-    adapter: Swoosh.Adapters.Resend,
-    api_key: resend_api_key
+  if resend_enabled do
+    config :frontman_server, FrontmanServer.Mailer,
+      adapter: Swoosh.Adapters.Resend,
+      api_key: resend_api_key
+  end
 end

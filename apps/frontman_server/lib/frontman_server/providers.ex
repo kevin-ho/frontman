@@ -18,6 +18,7 @@ defmodule FrontmanServer.Providers do
   alias FrontmanServer.Providers.{
     AnthropicOAuth,
     ApiKey,
+    CustomLLM,
     CustomProvider,
     OAuthToken,
     OpenAIOAuth
@@ -107,7 +108,27 @@ defmodule FrontmanServer.Providers do
 
   def resolve_model_access(%Scope{} = scope, model, opts)
       when is_binary(model) and model != "" do
-    with {:ok, {credential_source, resolved_model}} <- resolve_catalog_model(model) do
+    # LOCAL-NOAUTH PATCH: the env-configured custom provider (fork-only
+    # CustomLLM module) wins when the selected model carries its provider id;
+    # otherwise fall through to the upstream catalog/oauth/api-key chain.
+    custom_dispatch =
+      case model_parts(model) do
+        {:ok, {provider, _name}} ->
+          case CustomLLM.config() do
+            %{provider_id: ^provider} = custom -> {:custom, custom}
+            _other -> :catalog
+          end
+
+        :error ->
+          :catalog
+      end
+
+    case custom_dispatch do
+      {:custom, custom} ->
+        CustomLLM.llm_args(custom, model, opts)
+
+      :catalog ->
+        with {:ok, {credential_source, resolved_model}} <- resolve_catalog_model(model) do
       case oauth_llm_opts(credential_source, resolve_oauth_token(scope, credential_source)) do
         {:ok, llm_opts} ->
           {:ok,
@@ -117,8 +138,9 @@ defmodule FrontmanServer.Providers do
           {:error, reason}
 
         :use_api_key ->
-          api_key_llm_args(scope, credential_source, resolved_model, opts)
-      end
+            api_key_llm_args(scope, credential_source, resolved_model, opts)
+          end
+        end
     end
   end
 
@@ -544,6 +566,23 @@ defmodule FrontmanServer.Providers do
       end)
 
     groups = groups ++ build_custom_provider_groups(scope)
+
+    # LOCAL-NOAUTH PATCH: prepend the env-configured custom provider group so
+    # fresh browsers auto-select it as the default model. Values keep the
+    # "provider:model" shape that resolve_model_access dispatches on.
+    groups =
+      case CustomLLM.config() do
+        nil ->
+          groups
+
+        custom ->
+          options =
+            Enum.map(custom.models, fn {name, model_id, _spec} ->
+              %{name: name, value: "#{custom.provider_id}:#{model_id}"}
+            end)
+
+          [%{id: custom.provider_id, name: custom.display_name, options: options} | groups]
+      end
 
     %{groups: groups}
   end

@@ -203,9 +203,17 @@ defmodule SwarmAi.LLM.Response do
       MapSet.member?(malformed_indexes, index) ->
         raw = Map.fetch!(fragments_by_index, index)
 
-        Logger.warning("Tool call #{name} (#{id}) has invalid JSON arguments")
+        case repair_missing_leading_brace(raw) do
+          nil ->
+            Logger.warning("Tool call #{name} (#{id}) has invalid JSON arguments")
 
-        raw
+            raw
+
+          repaired ->
+            Logger.info("Tool call #{name} (#{id}) arguments lost leading brace; repaired")
+
+            repaired
+        end
 
       Map.has_key?(fragments_by_index, index) ->
         Map.fetch!(fragments_by_index, index)
@@ -225,6 +233,29 @@ defmodule SwarmAi.LLM.Response do
   defp encode_tool_call_arguments(args) when is_binary(args), do: args
   defp encode_tool_call_arguments(args) when is_map(args), do: Jason.encode!(args)
   defp encode_tool_call_arguments(args), do: Jason.encode!(args)
+
+  defp repair_missing_leading_brace(raw) when is_binary(raw) do
+    trimmed = String.trim(raw)
+
+    cond do
+      String.starts_with?(trimmed, "{") ->
+        nil
+
+      String.trim_trailing(trimmed, ",") == "" ->
+        nil
+
+      true ->
+        candidate = "{\n" <> trimmed
+
+        case Jason.decode(candidate) do
+          {:ok, decoded} when is_map(decoded) -> Jason.encode!(decoded)
+          {:ok, _other} -> nil
+          {:error, _reason} -> nil
+        end
+    end
+  end
+
+  defp repair_missing_leading_brace(_), do: nil
 
   defp empty_tool_call_arguments?(nil), do: true
 

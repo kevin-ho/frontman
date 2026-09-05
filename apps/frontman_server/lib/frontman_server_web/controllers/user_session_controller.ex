@@ -13,17 +13,29 @@ defmodule FrontmanServerWeb.UserSessionController do
   alias FrontmanServerWeb.UserAuth
 
   def new(conn, params) do
-    email = get_in(conn.assigns, [:current_scope, Access.key(:user), Access.key(:email)])
-    form = Phoenix.Component.to_form(%{"email" => email}, as: "user")
+    # LOCAL-NOAUTH PATCH: in single-user local mode, visiting the login page
+    # mints a real session for the local user instead of showing the OAuth
+    # form. WorkOS is never consulted. Honors ?return_to= like the normal
+    # login flow (safe_return_url? still applies inside log_in_user).
+    case local_noauth_user() do
+      %Accounts.User{} = user ->
+        # LOCAL-NOAUTH PATCH: preserve the overlay's embedded-client auth
+        # request (state/origin) before minting the session — log_in_user
+        # restores it into the renewed session so the overlay's origin-bound
+        # token flow completes without ever showing a login form. Mirrors
+        # new_oauth's store; on invalid origin upstream already sent a 400.
+        case EmbeddedClientAuth.put_pending_request(conn, params) do
+          {:ok, conn} ->
+            conn
+            |> maybe_put_user_return_to(params["return_to"])
+            |> UserAuth.log_in_user(user, %{})
 
-    conn =
-      conn
-      |> maybe_put_user_return_to(params["return_to"])
-      |> maybe_put_signup_framework(params["framework"])
+          {:error, conn} ->
+            conn
+        end
 
-    case EmbeddedClientAuth.put_pending_request(conn, params) do
-      {:ok, conn} -> render(conn, :new, form: form)
-      {:error, conn} -> conn
+      nil ->
+        new_oauth(conn, params)
     end
   end
 
@@ -102,10 +114,34 @@ defmodule FrontmanServerWeb.UserSessionController do
     render(conn, :confirm_logout, return_to: params["return_to"])
   end
 
+  def popup_complete(conn, _params), do: render(conn, :popup_complete)
+
   def delete(conn, params) do
     conn
     |> put_flash(:info, "Logged out successfully.")
     |> UserAuth.log_out_user(params["return_to"])
+  end
+
+  # LOCAL-NOAUTH PATCH: nil unless local mode is on AND the seeded user exists,
+  # so a stale LOCAL_NOAUTH_USER_ID falls back to the real login page instead of
+  # rendering a dead form.
+  defp local_noauth_user do
+    case Application.get_env(:frontman_server, :local_noauth_user_id) do
+      nil -> nil
+      user_id -> Accounts.get_user(user_id)
+    end
+  end
+
+  defp new_oauth(conn, params) do
+    email = get_in(conn.assigns, [:current_scope, Access.key(:user), Access.key(:email)])
+    form = Phoenix.Component.to_form(%{"email" => email}, as: "user")
+
+    conn =
+      conn
+      |> maybe_put_user_return_to(params["return_to"])
+      |> maybe_put_signup_framework(params["framework"])
+
+    render(conn, :new, form: form)
   end
 
   defp maybe_put_user_return_to(conn, nil), do: conn

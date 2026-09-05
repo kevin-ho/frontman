@@ -50,3 +50,4 @@ infra/local/Caddyfile
 lefthook-local.yml
 .tiqet/log/
 .tiqet/events/
+apps/frontman_server/.env

@@ -130,6 +130,20 @@ defmodule FrontmanServerWeb.UserAuth do
   Will reissue the session token if it is older than the configured age.
   """
   def fetch_current_scope_for_user(conn, _opts) do
+    # LOCAL-NOAUTH PATCH: single-user local mode. When enabled, every request
+    # is treated as the seeded local user; WorkOS/OAuth is never consulted.
+    case Application.get_env(:frontman_server, :local_noauth_user_id) do
+      nil ->
+        fetch_current_scope_for_user_original(conn)
+
+      user_id ->
+        # Scope.for_user/1 maps a missing user to nil — a bad LOCAL_NOAUTH_USER_ID
+        # then behaves like "not signed in" rather than half-authenticating.
+        assign(conn, :current_scope, Scope.for_user(Accounts.get_user(user_id)))
+    end
+  end
+
+  defp fetch_current_scope_for_user_original(conn) do
     case ensure_user_token(conn) do
       {token, conn} ->
         case Accounts.get_user_by_session_token(token) do
@@ -307,6 +321,16 @@ defmodule FrontmanServerWeb.UserAuth do
   Plug for routes that require sudo mode.
   """
   def require_sudo_mode(conn, _opts) do
+    # LOCAL-NOAUTH PATCH: sudo mode is a re-auth gate for shared machines;
+    # meaningless for a single-user local install. Checked first so a missing
+    # local user can't blow up on conn.assigns.current_scope.user.
+    case Application.get_env(:frontman_server, :local_noauth_user_id) do
+      nil -> require_sudo_mode_original(conn)
+      _user_id -> conn
+    end
+  end
+
+  defp require_sudo_mode_original(conn) do
     if Accounts.sudo_mode?(conn.assigns.current_scope.user, -10) do
       conn
     else
@@ -325,6 +349,25 @@ defmodule FrontmanServerWeb.UserAuth do
   redirects to that URL instead of the default signed-in path.
   """
   def redirect_if_user_is_authenticated(conn, _opts) do
+    # LOCAL-NOAUTH PATCH: in local mode the login page is the session-minting
+    # endpoint (UserSessionController.new mints a real session cookie there).
+    # Never short-circuit it — let the controller run so the cookie lands.
+    # BUT still store the embedded-client auth request first: for an already
+    # authenticated browser this plug is what records the overlay's
+    # state/origin before the token issuance controller consumes it.
+    case Application.get_env(:frontman_server, :local_noauth_user_id) do
+      nil ->
+        redirect_if_user_is_authenticated_original(conn)
+
+      _user_id ->
+        case EmbeddedClientAuth.put_pending_request(conn, conn.params) do
+          {:ok, conn} -> conn
+          {:error, conn} -> conn
+        end
+    end
+  end
+
+  defp redirect_if_user_is_authenticated_original(conn) do
     if conn.assigns.current_scope do
       case EmbeddedClientAuth.put_pending_request(conn, conn.params) do
         {:ok, conn} ->

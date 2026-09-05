@@ -15,7 +15,14 @@ defmodule FrontmanServerWeb.UserApiKeyController do
   def index(conn, _params) do
     scope = conn.assigns.current_scope
 
-    json(conn, %{"providers" => Providers.list_api_key_providers(scope)})
+    # LOCAL-NOAUTH PATCH: opens the compiled client's provider-setup gate when a
+    # CUSTOM_LLM_* provider is configured — see LocalNoauth.api_key_gate_markers/1.
+    providers =
+      scope
+      |> Providers.list_api_key_providers()
+      |> FrontmanServerWeb.LocalNoauth.api_key_gate_markers()
+
+    json(conn, %{"providers" => providers})
   end
 
   @doc """
